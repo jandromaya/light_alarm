@@ -1,0 +1,10 @@
+# Ignore build output
+build/
+
+#Ignore Kconfig.projbuild
+**/Kconfig.projbuild
+
+# Ignore editor/IDE files
+.vscode/
+sdkconfig
+.clangd
