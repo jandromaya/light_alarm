@@ -1,0 +1,12 @@
+menu "Project WiFi Configuration"
+    config WIFI_SSID
+        string "WiFi SSID"
+        default "lakelikeanocean"
+        help
+            SSID of the WiFi Network you connect to
+    config WIFI_PASSWORD
+        string "WIFI_PASSWORD"
+        default "lookatthatview"
+        help
+            Password of the WiFi Network you connect to
+endmenu
