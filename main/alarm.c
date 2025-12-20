@@ -1,0 +1,249 @@
+#include "alarm.h"
+#include "esp_log.h"
+#include "esp_wifi.h"
+#include "esp_mac.h"
+#include "esp_netif_sntp.h"
+#include "nvs_flash.h"
+
+static const char *TAG = "alarm";
+
+#define WIFI_AUTHMODE WIFI_AUTH_WPA2_PSK
+#define WIFI_CONNECTED_BIT BIT0
+#define WIFI_FAIL_BIT BIT1
+
+static const int WIFI_RETRY_ATTEMPT = 3;
+static int wifi_retry_count = 0;
+
+static esp_netif_t *tutorial_netif = NULL;
+static esp_event_handler_instance_t ip_event_handler;
+static esp_event_handler_instance_t wifi_event_handler;
+
+static EventGroupHandle_t s_wifi_event_group = NULL;
+
+static void ip_event_cb(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
+{
+    ESP_LOGI(TAG, "Handling IP event, event code 0x%" PRIx32, event_id);
+    switch (event_id)
+    {
+    case (IP_EVENT_STA_GOT_IP):
+        ip_event_got_ip_t *event_ip = (ip_event_got_ip_t *)event_data;
+        ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&event_ip->ip_info.ip));
+        wifi_retry_count = 0;
+        xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
+        break;
+    case (IP_EVENT_STA_LOST_IP):
+        ESP_LOGI(TAG, "Lost IP");
+        break;
+    case (IP_EVENT_GOT_IP6):
+        ip_event_got_ip6_t *event_ip6 = (ip_event_got_ip6_t *)event_data;
+        ESP_LOGI(TAG, "Got IPv6: " IPV6STR, IPV62STR(event_ip6->ip6_info.ip));
+        wifi_retry_count = 0;
+        xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
+        break;
+    default:
+        ESP_LOGI(TAG, "IP event not handled");
+        break;
+    }
+}
+
+static void wifi_event_cb(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
+{
+    ESP_LOGI(TAG, "Handling Wi-Fi event, event code 0x%" PRIx32, event_id);
+
+    switch (event_id)
+    {
+    case (WIFI_EVENT_WIFI_READY):
+        ESP_LOGI(TAG, "Wi-Fi ready");
+        break;
+    case (WIFI_EVENT_SCAN_DONE):
+        ESP_LOGI(TAG, "Wi-Fi scan done");
+        break;
+    case (WIFI_EVENT_STA_START):
+        ESP_LOGI(TAG, "Wi-Fi started, connecting to AP...");
+        esp_wifi_connect();
+        break;
+    case (WIFI_EVENT_STA_STOP):
+        ESP_LOGI(TAG, "Wi-Fi stopped");
+        break;
+    case (WIFI_EVENT_STA_CONNECTED):
+        ESP_LOGI(TAG, "Wi-Fi connected");
+        break;
+    case (WIFI_EVENT_STA_DISCONNECTED):
+        ESP_LOGI(TAG, "Wi-Fi disconnected");
+        if (wifi_retry_count < WIFI_RETRY_ATTEMPT) {
+            ESP_LOGI(TAG, "Retrying to connect to Wi-Fi network...");
+            esp_wifi_connect();
+            wifi_retry_count++;
+        } else {
+            ESP_LOGI(TAG, "Failed to connect to Wi-Fi network");
+            xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
+        }
+        break;
+    case (WIFI_EVENT_STA_AUTHMODE_CHANGE):
+        ESP_LOGI(TAG, "Wi-Fi authmode changed");
+        break;
+    default:
+        ESP_LOGI(TAG, "Wi-Fi event not handled");
+        break;
+    }
+}
+
+esp_err_t wifi_initialize(void)
+{
+    // initialize non-volatile storage (nvs)
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+
+    s_wifi_event_group = xEventGroupCreate();
+
+    ret = esp_netif_init();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to initialize TCP/IP network stack");
+        return ret;
+    }
+
+    ret = esp_event_loop_create_default();  //  The event loop lets components declare events and place them on the loop. 
+                                            // other components may see the event son the loop and execute a handler in response.
+                                            // For example, a successful WI-FI connection may be an event that other components can react to
+
+    ret = esp_wifi_set_default_wifi_sta_handlers();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to set default handlers");
+        return ret;
+    }
+
+    tutorial_netif = esp_netif_create_default_wifi_sta();
+    if (tutorial_netif == NULL) {
+        ESP_LOGE(TAG, "Failed to create default wifi sta interface");
+        return ESP_FAIL;
+    }
+
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT,
+                                                        ESP_EVENT_ANY_ID,
+                                                        &wifi_event_cb,
+                                                        NULL,
+                                                        &wifi_event_handler));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT,
+                                                        ESP_EVENT_ANY_ID,
+                                                        &ip_event_cb,
+                                                        NULL,
+                                                        &ip_event_handler));
+    return ret;
+}
+
+esp_err_t wifi_connect(const char* wifi_ssid, const char* wifi_password)
+{
+    wifi_config_t wifi_config = {
+        .sta = {
+            .threshold.authmode = WIFI_AUTHMODE,
+        },
+    };
+
+    // copying the wifi_ssid and wifi_password parameters into the memory of the wifi_config struct
+    strncpy((char*)wifi_config.sta.ssid, wifi_ssid, sizeof(wifi_config.sta.ssid));
+    strncpy((char*)wifi_config.sta.password, wifi_password, sizeof(wifi_config.sta.password));
+
+    ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE)); // default is WIFI_PS_MIN_MODEM
+    ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM)); // default is WIFI_STORAGE_FLASH
+
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
+
+    ESP_LOGI(TAG, "Connecting to Wi-Fi network: %s", wifi_config.sta.ssid);
+    ESP_ERROR_CHECK(esp_wifi_start());
+
+    EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
+        pdFALSE, pdFALSE, portMAX_DELAY);
+
+    if (bits & WIFI_CONNECTED_BIT) {
+        ESP_LOGI(TAG, "Connected to Wi-Fi network: %s", wifi_config.sta.ssid);
+        return ESP_OK;
+    } else if (bits & WIFI_FAIL_BIT) {
+        ESP_LOGE(TAG, "Failed to connect to Wi-Fi network: %s", wifi_config.sta.ssid);
+        return ESP_FAIL;
+    }
+
+    ESP_LOGE(TAG, "Unexpected Wi-Fi error");
+    return ESP_FAIL;
+}
+
+esp_err_t wifi_disconnect(void)
+{
+    if (s_wifi_event_group) {
+        vEventGroupDelete(s_wifi_event_group);
+    }
+
+    return esp_wifi_disconnect();
+}
+
+esp_err_t wifi_deinitialize(void)
+{
+    esp_err_t ret = esp_wifi_stop();
+    if (ret == ESP_ERR_WIFI_NOT_INIT) {
+        ESP_LOGE(TAG, "Wi-Fi stack not initialized");
+        return ret;
+    }
+
+    ESP_ERROR_CHECK(esp_wifi_deinit());
+    ESP_ERROR_CHECK(esp_wifi_clear_default_wifi_driver_and_handlers(tutorial_netif));
+    esp_netif_destroy(tutorial_netif);
+
+    ESP_ERROR_CHECK(esp_event_handler_instance_unregister(IP_EVENT, ESP_EVENT_ANY_ID, ip_event_handler));
+    ESP_ERROR_CHECK(esp_event_handler_instance_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event_handler));
+
+    return ESP_OK;
+}
+
+bool calculate_sleep_time(int wakeup_hour, int wakeup_min, uint64_t *sleep_us_out) {
+    if (wakeup_hour < 0 || wakeup_hour > 23 ||
+         wakeup_min < 0 || wakeup_min > 59) {
+        return false;
+    }
+
+
+    esp_sntp_config_t config = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
+    esp_netif_sntp_init(&config);
+    if (esp_netif_sntp_sync_wait(pdMS_TO_TICKS(10000)) != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to update system time within 10s timeout");
+    }
+
+
+    time_t now;
+    struct tm target_time;
+    time(&now);
+    setenv("TZ", "CST6CDT,M3.2.0/2,M11.1.0", 1);
+    tzset();
+    localtime_r(&now, &target_time);
+    // set time to desired wake up time (may be on same or next day)
+    target_time.tm_sec = 0;
+    if (target_time.tm_hour < wakeup_hour ||
+        (target_time.tm_hour == wakeup_hour &&
+         target_time.tm_min < wakeup_min)) {
+        // today
+        target_time.tm_hour = wakeup_hour;
+        target_time.tm_min = wakeup_min;
+    }
+    else {
+        // next day
+        target_time.tm_hour = wakeup_hour;
+        target_time.tm_min = wakeup_min;
+        target_time.tm_mday += 1;
+    }
+
+    // return difference in microseconds
+    time_t wakeup_time = mktime(&target_time);
+    
+    if (wakeup_time <= now) // safety check
+        return false;
+
+    *sleep_us_out = (uint64_t)(wakeup_time - now) * 1000000ULL;
+    
+    return true;
+}
+
