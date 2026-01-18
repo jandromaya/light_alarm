@@ -216,11 +216,11 @@ void app_main(void)
     ESP_ERROR_CHECK(wifi_initialize());
     ESP_ERROR_CHECK(wifi_connect(WIFI_SSID, WIFI_PASSWORD));
 
-    ESP_ERROR_CHECK(http_dns_lookup());
-    ESP_ERROR_CHECK(http_create_socket_and_set_timeouts());
-    ESP_ERROR_CHECK(http_connect_to_server());
+    // ESP_ERROR_CHECK(http_dns_lookup());
+    // ESP_ERROR_CHECK(http_create_socket_and_set_timeouts());
+    // ESP_ERROR_CHECK(http_connect_to_server());
     ESP_ERROR_CHECK(http_send_request());
-    ESP_ERROR_CHECK(http_receive_data());
+    // ESP_ERROR_CHECK(http_receive_data());
 
     xTaskCreate(deep_sleep_task, "deep_sleep_task", 4096, NULL, 6, NULL);
 }
