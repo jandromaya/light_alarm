@@ -1,11 +1,9 @@
-#include "alarm.h"
-#include "esp_log.h"
+#include "wifi.h"
 #include "esp_wifi.h"
 #include "esp_mac.h"
-#include "esp_netif_sntp.h"
 #include "nvs_flash.h"
 
-static const char *TAG = "alarm";
+static const char *TAG = "my_wifi";
 
 #define WIFI_AUTHMODE WIFI_AUTH_WPA2_PSK
 #define WIFI_CONNECTED_BIT BIT0
@@ -200,50 +198,5 @@ esp_err_t wifi_deinitialize(void)
     return ESP_OK;
 }
 
-bool calculate_sleep_time(int wakeup_hour, int wakeup_min, uint64_t *sleep_us_out) {
-    if (wakeup_hour < 0 || wakeup_hour > 23 ||
-         wakeup_min < 0 || wakeup_min > 59) {
-        return false;
-    }
 
-
-    esp_sntp_config_t config = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
-    esp_netif_sntp_init(&config);
-    if (esp_netif_sntp_sync_wait(pdMS_TO_TICKS(10000)) != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to update system time within 10s timeout");
-    }
-
-
-    time_t now;
-    struct tm target_time;
-    time(&now);
-    setenv("TZ", "CST6CDT,M3.2.0/2,M11.1.0", 1);
-    tzset();
-    localtime_r(&now, &target_time);
-    // set time to desired wake up time (may be on same or next day)
-    target_time.tm_sec = 0;
-    if (target_time.tm_hour < wakeup_hour ||
-        (target_time.tm_hour == wakeup_hour &&
-         target_time.tm_min < wakeup_min)) {
-        // today
-        target_time.tm_hour = wakeup_hour;
-        target_time.tm_min = wakeup_min;
-    }
-    else {
-        // next day
-        target_time.tm_hour = wakeup_hour;
-        target_time.tm_min = wakeup_min;
-        target_time.tm_mday += 1;
-    }
-
-    // return difference in microseconds
-    time_t wakeup_time = mktime(&target_time);
-    
-    if (wakeup_time <= now) // safety check
-        return false;
-
-    *sleep_us_out = (uint64_t)(wakeup_time - now) * 1000000ULL;
-    
-    return true;
-}
 

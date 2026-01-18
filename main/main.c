@@ -13,16 +13,70 @@
 #include "driver/rtc_io.h"
 #include "ir_nec_decoder.h"
 #include "servo.h"
-#include "alarm.h"
+#include "wifi.h"
 #include "esp_wifi.h"
+#include "esp_netif_sntp.h"
+#include "http.h"
 
 #define WIFI_SSID   CONFIG_WIFI_SSID
 #define WIFI_PASSWORD   CONFIG_WIFI_PASSWORD
 
 static const char *TAG = "main";
 RTC_SLOW_ATTR static struct timeval last_sleep;
-static const int ALARM_HOUR = 6;
-static const int ALARM_MIN = 0;
+static const int ALARM_HOUR = 21;
+static const int ALARM_MIN = 56;
+
+/**
+ * @brief calculates amount of time in microseconds between the current time and the desired wake-up time.
+ * @param int wakeup_time (between 0 and 23), int wakeup_min (between 0 and 59)
+ * output: true if diff calcualted correctly, false otherwise (probably if inputs out of range)
+ */
+bool calculate_sleep_time(int wakeup_hour, int wakeup_min, uint64_t *sleep_us_out) {
+    if (wakeup_hour < 0 || wakeup_hour > 23 ||
+         wakeup_min < 0 || wakeup_min > 59) {
+        return false;
+    }
+
+
+    esp_sntp_config_t config = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
+    esp_netif_sntp_init(&config);
+    if (esp_netif_sntp_sync_wait(pdMS_TO_TICKS(10000)) != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to update system time within 10s timeout");
+    }
+
+
+    time_t now;
+    struct tm target_time;
+    time(&now);
+    setenv("TZ", "CST6CDT,M3.2.0/2,M11.1.0", 1);
+    tzset();
+    localtime_r(&now, &target_time);
+    // set time to desired wake up time (may be on same or next day)
+    target_time.tm_sec = 0;
+    if (target_time.tm_hour < wakeup_hour ||
+        (target_time.tm_hour == wakeup_hour &&
+         target_time.tm_min < wakeup_min)) {
+        // today
+        target_time.tm_hour = wakeup_hour;
+        target_time.tm_min = wakeup_min;
+    }
+    else {
+        // next day
+        target_time.tm_hour = wakeup_hour;
+        target_time.tm_min = wakeup_min;
+        target_time.tm_mday += 1;
+    }
+
+    // return difference in microseconds
+    time_t wakeup_time = mktime(&target_time);
+    
+    if (wakeup_time <= now) // safety check
+        return false;
+
+    *sleep_us_out = (uint64_t)(wakeup_time - now) * 1000000ULL;
+    
+    return true;
+}
 
 static bool example_rmt_rx_done_callback(rmt_channel_handle_t channel, const rmt_rx_done_event_data_t *edata, void *user_data)
 {
@@ -161,6 +215,12 @@ void app_main(void)
     
     ESP_ERROR_CHECK(wifi_initialize());
     ESP_ERROR_CHECK(wifi_connect(WIFI_SSID, WIFI_PASSWORD));
+
+    ESP_ERROR_CHECK(http_dns_lookup());
+    ESP_ERROR_CHECK(http_create_socket_and_set_timeouts());
+    ESP_ERROR_CHECK(http_connect_to_server());
+    ESP_ERROR_CHECK(http_send_request());
+    ESP_ERROR_CHECK(http_receive_data());
 
     xTaskCreate(deep_sleep_task, "deep_sleep_task", 4096, NULL, 6, NULL);
 }
