@@ -1,7 +1,7 @@
 #include <string.h>
 #include "http.h"
 
-#define RCV_BUF_SIZE    1028
+#define RCV_BUF_SIZE    512
 static char rcv_buf[RCV_BUF_SIZE];
 
 static const char *TAG = "http";
@@ -37,10 +37,9 @@ static esp_err_t _http_event_handler(esp_http_client_event_t *evt)
                 memset(evt->user_data, 0, MAX_HTTP_OUTPUT_BUFFER);
             }
             
-            // FOR TESTING: Print received data to console
+            // Set rcv_buf to the received data
             memcpy(rcv_buf, evt->data, evt->data_len);
             rcv_buf[evt->data_len] = '\0';
-            printf("%s\r\n", rcv_buf);
 
             /*
              *  Check for chunked encoding is added as the URL for chunked encoding used in this example returns binary data.
@@ -149,6 +148,9 @@ static esp_err_t https_with_url(void) {
  * @brief sends HTTP request. On success, returns ESP_OK. On failure,
  * returns ESP_FAIL (works by calling https_with_url)
  */
-esp_err_t http_send_request() {
-    return https_with_url();
+esp_err_t http_send_request(char **buffer) {
+    esp_err_t ret = https_with_url();
+    *buffer = rcv_buf;
+    
+    return ret;
 }

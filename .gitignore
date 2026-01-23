@@ -6,5 +6,5 @@ build/
 
 # Ignore editor/IDE files
 .vscode/
-sdkconfig
+sdkconfig*
 .clangd

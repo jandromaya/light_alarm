@@ -17,14 +17,17 @@
 #include "esp_wifi.h"
 #include "esp_netif_sntp.h"
 #include "http.h"
+#include "cJSON.h"
 
 #define WIFI_SSID   CONFIG_WIFI_SSID
 #define WIFI_PASSWORD   CONFIG_WIFI_PASSWORD
 
 static const char *TAG = "main";
 RTC_SLOW_ATTR static struct timeval last_sleep;
-static const int ALARM_HOUR = 21;
-static const int ALARM_MIN = 56;
+
+static int ALARM_HOUR;
+static int ALARM_MIN;
+static bool ALARM_ENABLED;
 
 /**
  * @brief calculates amount of time in microseconds between the current time and the desired wake-up time.
@@ -88,22 +91,31 @@ static bool example_rmt_rx_done_callback(rmt_channel_handle_t channel, const rmt
 }
 
 static void deep_sleep_task() {
+    // first we just print what time it is now 
     gettimeofday(&last_sleep, NULL);
     struct tm *time = localtime(&last_sleep.tv_sec);
     ESP_LOGI(TAG, "It is %d:%d:%d", time->tm_hour, time->tm_min, time->tm_sec);
     ESP_LOGI(TAG, "Entering deep sleep...");
     
+    // now we find out how many us we need to sleep for using calculate_sleep_time
     uint64_t wake_time_us;
     if (calculate_sleep_time(ALARM_HOUR, ALARM_MIN, &wake_time_us) == false) {
         ESP_LOGE(TAG, "Failed to compute sleep time");
         return;
     }
     
+    // now that we have gotten all the HTTP and SNTP data we need, wifi is
+    // no longer needed
     ESP_ERROR_CHECK(wifi_disconnect());
     ESP_ERROR_CHECK(wifi_deinitialize());
 
-    esp_sleep_enable_timer_wakeup(wake_time_us);
-    ESP_LOGI(TAG, "Waking up in %llu microseconds", wake_time_us);
+    // if the alarm is enabled, we should set a wakeup time
+    if (ALARM_ENABLED) {
+        esp_sleep_enable_timer_wakeup(wake_time_us);
+        ESP_LOGI(TAG, "Waking up in %llu microseconds", wake_time_us);
+    }
+
+    // otherwise, we can just sleep and wait for an interrupt wakeup
     esp_deep_sleep_start();
 }
 
@@ -131,6 +143,44 @@ void print_wakeup_cause() {
             ESP_LOGE(TAG, "ERROR: Something else woke me up. Time: %d", sleep_time_ms);
             break;
     }
+}
+
+esp_err_t process_web_data(char *buffer) {
+    cJSON *json;    // cJSON variables for each cJSON object we access
+    cJSON *alarm;
+    cJSON *enabled;
+    cJSON *hour;
+    cJSON *minute;
+    
+    // Parsing the JSON
+    json = cJSON_Parse(buffer);
+
+    if (json == NULL) { // checking for errors, per cJSON docs, only need to do after parse
+        const char *error_ptr = cJSON_GetErrorPtr();
+        if (error_ptr != NULL)
+        {
+            ESP_LOGE(TAG, "Error before: %s\n", error_ptr);
+        }
+        return ESP_FAIL;
+    }
+
+    // After parsing the JSON, we get each key-value pair with GetObjectItem
+    alarm = cJSON_GetObjectItem(json, "alarm");
+    enabled = cJSON_GetObjectItem(alarm, "enabled");
+    hour = cJSON_GetObjectItem(alarm, "hour");
+    minute = cJSON_GetObjectItem(alarm, "minute");
+
+    // we set the ALARM variables to their correct values
+    ALARM_ENABLED = (enabled->type == cJSON_True) ? true : false;
+    ESP_LOGI(TAG, "ALARM_ENABLED = %d", ALARM_ENABLED);
+    ALARM_HOUR = hour->valueint;
+    ESP_LOGI(TAG, "ALARM_HOUR = %d", ALARM_HOUR);
+    ALARM_MIN = minute->valueint;
+    ESP_LOGI(TAG, "ALARM_MIN = %d", ALARM_MIN);
+
+    // we no longer need the JSON items, so we can free all the memory associated with it
+    cJSON_Delete(json);
+    return ESP_OK;
 }
 
 void app_main(void)
@@ -216,11 +266,14 @@ void app_main(void)
     ESP_ERROR_CHECK(wifi_initialize());
     ESP_ERROR_CHECK(wifi_connect(WIFI_SSID, WIFI_PASSWORD));
 
-    // ESP_ERROR_CHECK(http_dns_lookup());
-    // ESP_ERROR_CHECK(http_create_socket_and_set_timeouts());
-    // ESP_ERROR_CHECK(http_connect_to_server());
-    ESP_ERROR_CHECK(http_send_request());
-    // ESP_ERROR_CHECK(http_receive_data());
+    char *buf;
+    ESP_ERROR_CHECK(http_send_request(&buf));
+    ESP_LOGI(TAG, "PRINTING FROM MAIN:");
+    printf("%s\r\n", buf);
+
+    ESP_ERROR_CHECK(process_web_data(buf));
+    
+    
 
     xTaskCreate(deep_sleep_task, "deep_sleep_task", 4096, NULL, 6, NULL);
 }
